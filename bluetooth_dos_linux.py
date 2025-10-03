@@ -60,67 +60,98 @@ class BluetoothDOSLinux:
             sys.exit(1)
     
     def scan_devices(self, duration: int = 8) -> List[Dict[str, str]]:
-        """Scan for Bluetooth devices using hcitool"""
+        """Scan for Bluetooth devices using bluetoothctl (more reliable)"""
         print(f"\n[*] Scanning for Bluetooth devices ({duration}s)...")
         print("[*] Please wait...\n")
         
+        self.devices = []
+        
         try:
-            # Use hcitool to scan
+            # First, ensure Bluetooth adapter is powered on
+            print("[*] Powering on Bluetooth adapter...")
+            subprocess.run(['sudo', 'hciconfig', 'hci0', 'up'], capture_output=True)
+            subprocess.run(['sudo', 'bluetoothctl', 'power', 'on'], capture_output=True)
+            time.sleep(1)
+            
+            # Method 1: Use bluetoothctl (most reliable)
+            print("[*] Using bluetoothctl to scan...")
+            
+            # Start scan in background
+            scan_proc = subprocess.Popen(
+                ['bluetoothctl', 'scan', 'on'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Let it scan
+            time.sleep(duration)
+            
+            # Stop scan
+            subprocess.run(['bluetoothctl', 'scan', 'off'], capture_output=True)
+            scan_proc.terminate()
+            
+            # Get devices
             result = subprocess.run(
-                ['timeout', str(duration), 'hcitool', 'scan'],
+                ['bluetoothctl', 'devices'],
                 capture_output=True,
                 text=True
             )
             
-            self.devices = []
-            lines = result.stdout.split('\n')[1:]  # Skip header
-            
-            for line in lines:
-                line = line.strip()
-                if line:
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        addr = parts[0].strip()
-                        name = parts[1].strip() if len(parts) > 1 else "Unknown"
-                        
-                        # Get device class
-                        dev_type = self._get_device_type(addr)
+            for line in result.stdout.split('\n'):
+                if line.startswith('Device '):
+                    parts = line.split(' ', 2)
+                    if len(parts) >= 3:
+                        addr = parts[1].strip()
+                        name = parts[2].strip() if len(parts) > 2 else "Unknown"
                         
                         self.devices.append({
                             'address': addr,
                             'name': name,
-                            'type': dev_type
+                            'type': 'Bluetooth'
                         })
             
-            # Also scan for BLE devices
-            print("[*] Scanning for BLE devices...")
-            ble_result = subprocess.run(
-                ['timeout', str(duration), 'hcitool', 'lescan'],
-                capture_output=True,
-                text=True
-            )
-            
-            for line in ble_result.stdout.split('\n')[1:]:
-                line = line.strip()
-                if line:
-                    parts = line.split(' ', 1)
-                    if len(parts) >= 2:
-                        addr = parts[0].strip()
-                        name = parts[1].strip() if len(parts) > 1 else "Unknown BLE"
-                        
-                        # Avoid duplicates
-                        if not any(d['address'] == addr for d in self.devices):
-                            self.devices.append({
-                                'address': addr,
-                                'name': name,
-                                'type': 'BLE'
-                            })
+            # Method 2: Also try hcitool for classic devices
+            if len(self.devices) < 3:
+                print("[*] Also scanning with hcitool...")
+                hci_result = subprocess.run(
+                    ['timeout', str(duration), 'sudo', 'hcitool', 'scan'],
+                    capture_output=True,
+                    text=True
+                )
+                
+                for line in hci_result.stdout.split('\n')[1:]:
+                    line = line.strip()
+                    if line and '\t' in line:
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            addr = parts[0].strip()
+                            name = parts[1].strip()
+                            
+                            # Avoid duplicates
+                            if not any(d['address'] == addr for d in self.devices):
+                                self.devices.append({
+                                    'address': addr,
+                                    'name': name,
+                                    'type': 'Classic BT'
+                                })
             
             print(f"\n[+] Found {len(self.devices)} device(s)")
+            
+            if len(self.devices) == 0:
+                print("\n[!] No devices found. Troubleshooting tips:")
+                print("    1. Ensure target devices are powered on")
+                print("    2. Put devices in 'pairing mode' or 'discoverable mode'")
+                print("    3. Move closer to target devices")
+                print("    4. Run: sudo systemctl restart bluetooth")
+                print("    5. Run: sudo hciconfig hci0 up")
+                print("    6. Check adapter: hciconfig")
+            
             return self.devices
             
         except Exception as e:
             print(f"[!] Error scanning: {e}")
+            print("[!] Try running: sudo systemctl restart bluetooth")
             return []
     
     def _get_device_type(self, addr: str) -> str:
